@@ -38,8 +38,17 @@ Rode `build-runtime` de novo sempre que mudar o código do Workshop. Ele empacot
 release faz (`wrangler deploy --dry-run`) e falha se a configuração gerada apontar para algum caminho
 desta máquina.
 
-No app, baixe um modelo do catálogo (ou cole a URL https de um GGUF), selecione-o e clique em
-Iniciar. Quando o status ficar "pronto", clique em Abrir Workshop, crie sua conta e, lá, adicione um
+No app, escolha um nível de modelo e clique em Baixar; depois clique em Iniciar. Os níveis são
+Qwen3.5 em Q4_0, da [unsloth](https://huggingface.co/unsloth):
+
+| Nível | Modelo | Tamanho |
+| --- | --- | --- |
+| Low (padrão) | Qwen3.5 0.8B | 507 MB |
+| Medium | Qwen3.5 4B | 2,6 GB |
+| High | Qwen3.5 9B | 5,4 GB |
+
+Só um modelo fica instalado: baixar outro nível apaga o anterior (e reinicia o llama-server se ele
+estava rodando). O download é conferido pelo sha256 publicado pelo Hugging Face. Quando o status ficar "pronto", clique em Abrir Workshop, crie sua conta e, lá, adicione um
 modelo com o provedor **llama.cpp** e a URL `http://127.0.0.1:8089`. Para acessar o painel `/admin`,
 crie a conta com o usuário `admin`, como no `run-local`.
 
@@ -52,5 +61,5 @@ Um download interrompido continua de onde parou ao clicar em Baixar de novo.
 cd packages/desktop/src-tauri && cargo test -p desktop-core
 ```
 
-`desktop-core` guarda a lógica pura (validação de nome/URL, catálogo, a máquina de estados do
+`desktop-core` guarda a lógica pura (o catálogo dos três níveis, a máquina de estados do
 llama-server e os argumentos do `workerd`) e compila sem webkit.

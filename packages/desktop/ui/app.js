@@ -5,10 +5,11 @@ const STATUS_TEXT = { stopped: "parado", starting: "iniciando…", ready: "pront
 const MAX_LOGS = 40;
 
 const ui = {
-  catalog: [],
-  downloaded: [],
+  models: [],
+  installed: null,
+  downloading: null,
   selected: null,
-  progress: new Map(),
+  progress: null,
   llama: { status: "stopped" },
   logs: [],
 };
@@ -22,95 +23,75 @@ function el(tag, props, ...children) {
 }
 
 function formatBytes(bytes) {
-  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-}
-
-function filenameFromUrl(url) {
-  return decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "");
+  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1).replace(".", ",")} GB` : `${(bytes / 1e6).toFixed(0)} MB`;
 }
 
 function showError(error) {
   $("error").textContent = error ? String(error) : "";
 }
 
-async function refreshDownloaded() {
-  ui.downloaded = await invoke("list_downloaded");
-  if (!ui.downloaded.some((m) => m.filename === ui.selected)) ui.selected = ui.downloaded[0]?.filename ?? null;
+async function refreshCatalog() {
+  const catalog = await invoke("catalog");
+  ui.models = catalog.models;
+  ui.installed = catalog.installed;
+  ui.downloading = catalog.downloading;
+  ui.selected ??= catalog.installed ?? catalog.default;
   render();
 }
 
-async function download(url) {
+async function download(id) {
   showError();
-  const filename = filenameFromUrl(url);
-  ui.progress.set(filename, { received: 0, total: null });
+  ui.downloading = id;
+  ui.progress = null;
   render();
   try {
-    await invoke("download_model", { url, filename });
+    await invoke("download_model", { id });
   } catch (error) {
     showError(error);
   } finally {
-    ui.progress.delete(filename);
-    await refreshDownloaded();
+    ui.progress = null;
+    await refreshCatalog();
   }
 }
 
-function progressFor(filename) {
-  const progress = ui.progress.get(filename);
-  if (!progress) return [];
-  const bar = el("progress", { max: progress.total ?? 0, value: progress.received });
-  if (!progress.total) bar.removeAttribute("value");
-  return [bar, el("span", { textContent: formatBytes(progress.received) })];
-}
-
 function render() {
-  const have = new Set(ui.downloaded.map((m) => m.filename));
-  $("catalog").replaceChildren(...ui.catalog.map((model) => {
-    const filename = filenameFromUrl(model.url);
-    const busy = ui.progress.has(filename);
+  $("catalog").replaceChildren(...ui.models.map((model) => {
+    const badge = model.id === ui.installed ? " (instalado)" : "";
+    const progress = model.id === ui.downloading
+      ? [el("progress", { max: model.size, value: ui.progress?.received ?? 0 }),
+         el("span", { textContent: `${formatBytes(ui.progress?.received ?? 0)} de ${formatBytes(model.size)}` })]
+      : [];
     return el("li", {},
-      el("span", { className: "name", textContent: `${model.name} — ${formatBytes(model.size)}` }),
-      have.has(filename)
-        ? el("span", { textContent: "baixado" })
-        : el("button", { type: "button", textContent: busy ? "Baixando…" : "Baixar", disabled: busy, onclick: () => download(model.url) }),
-      ...progressFor(filename));
+      el("label", {},
+        el("input", { type: "radio", name: "model", value: model.id, checked: model.id === ui.selected, onchange: () => { ui.selected = model.id; render(); } }),
+        el("strong", { textContent: ` ${model.name}` }),
+        ` · ${model.model} · ${formatBytes(model.size)}${badge}`,
+        el("span", { className: "note", textContent: model.note })),
+      ...progress);
   }));
 
-  const custom = [...ui.progress.keys()].filter((f) => !ui.catalog.some((m) => filenameFromUrl(m.url) === f));
-  $("downloaded").replaceChildren(
-    ...custom.map((filename) => el("li", {}, el("span", { className: "name", textContent: filename }), ...progressFor(filename))),
-    ...(ui.downloaded.length === 0 ? [el("li", { textContent: "Nenhum modelo baixado ainda." })] : []),
-    ...ui.downloaded.map((model) => el("li", {},
-      el("label", { className: "name" },
-        el("input", { type: "radio", name: "model", checked: model.filename === ui.selected, onchange: () => { ui.selected = model.filename; render(); } }),
-        ` ${model.filename} — ${formatBytes(model.size)}`),
-      el("button", { type: "button", textContent: "Apagar", onclick: () => deleteModel(model.filename) }))));
+  const selected = ui.models.find((m) => m.id === ui.selected);
+  const button = $("download");
+  button.hidden = !selected || selected.id === ui.installed;
+  button.disabled = ui.downloading !== null;
+  button.textContent = ui.downloading
+    ? "Baixando…"
+    : ui.installed ? `Trocar para ${selected?.name}` : `Baixar ${selected?.name}`;
 
   const { status, model, error } = ui.llama;
   $("status").textContent = `${STATUS_TEXT[status]}${model ? ` (${model})` : ""}${error ? `: ${error}` : ""}`;
-  $("start").disabled = !ui.selected || status === "starting";
-  $("start").textContent = status === "ready" || status === "starting" ? "Reiniciar com o selecionado" : "Iniciar";
+  $("start").disabled = !ui.installed || status === "starting";
+  $("start").textContent = status === "ready" || status === "starting" ? "Reiniciar" : "Iniciar";
   $("stop").disabled = status === "stopped";
   $("logs").textContent = ui.logs.join("\n");
   $("logs").scrollTop = $("logs").scrollHeight;
 }
 
-async function deleteModel(filename) {
-  showError();
-  if (!confirm(`Apagar ${filename}?`)) return;
-  await invoke("delete_model", { filename }).catch(showError);
-  await refreshDownloaded();
-}
-
-$("custom").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const url = $("custom-url").value.trim();
-  $("custom-url").value = "";
-  download(url);
-});
+$("download").addEventListener("click", () => download(ui.selected));
 
 $("start").addEventListener("click", () => {
   showError();
-  invoke("start_llama", { filename: ui.selected }).catch(showError);
+  invoke("start_llama").catch(showError);
 });
 
 $("stop").addEventListener("click", () => invoke("stop_llama").catch(showError));
@@ -131,6 +112,7 @@ $("workshop").addEventListener("click", async () => {
 });
 
 await listen("llama-state", ({ payload }) => {
+  if (payload.status === "starting") ui.logs = [];
   ui.llama = payload;
   render();
 });
@@ -139,12 +121,11 @@ await listen("llama-log", ({ payload }) => {
   render();
 });
 await listen("download-progress", ({ payload }) => {
-  if (ui.progress.has(payload.filename)) ui.progress.set(payload.filename, payload);
+  if (payload.id === ui.downloading) ui.progress = payload;
   render();
 });
 
-ui.catalog = await invoke("list_catalog");
 const status = await invoke("llama_status");
 ui.llama = status.state;
 ui.logs = status.logs;
-await refreshDownloaded();
+await refreshCatalog();

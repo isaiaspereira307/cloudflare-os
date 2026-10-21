@@ -10,10 +10,9 @@
     section { margin-bottom: 24px; }
     ul { list-style: none; padding: 0; margin: 0; }
     li { display: flex; gap: 8px; align-items: center; padding: 6px 0; flex-wrap: wrap; }
-    li .name { flex: 1; min-width: 200px; }
+    li label { flex: 1; min-width: 200px; }
+    .note { display: block; opacity: 0.8; font-size: 0.9em; margin-left: 24px; }
     progress { width: 100%; }
-    form { display: flex; gap: 8px; }
-    form input { flex: 1; }
     pre { max-height: 220px; overflow: auto; font-size: 12px; padding: 8px; border: 1px solid #8884; }
     .error { color: #c33; }
     .hint { opacity: 0.8; }
@@ -23,17 +22,10 @@
   <h1>Gadgets Desktop</h1>
 
   <section>
-    <h2>Catálogo de modelos</h2>
+    <h2>Modelo</h2>
+    <p class="hint">Escolha um nível. Só um modelo fica instalado: baixar outro substitui o atual.</p>
     <ul id="catalog"></ul>
-    <form id="custom">
-      <input id="custom-url" type="url" placeholder="ou cole a URL de um GGUF (https://...)" aria-label="URL de um arquivo GGUF" required>
-      <button type="submit">Baixar</button>
-    </form>
-  </section>
-
-  <section>
-    <h2>Modelos baixados</h2>
-    <ul id="downloaded"></ul>
+    <button id="download" type="button"></button>
   </section>
 
   <section>

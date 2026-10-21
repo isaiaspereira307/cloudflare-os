@@ -2,59 +2,58 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::Path;
 
+/// One of the three model tiers the app offers. Only one is installed at a time.
 #[derive(Serialize)]
 pub struct CatalogModel {
     pub id: &'static str,
     pub name: &'static str,
+    pub model: &'static str,
+    pub note: &'static str,
+    pub filename: &'static str,
     pub url: &'static str,
     pub size: u64,
+    pub sha256: &'static str,
 }
 
-// Sizes are the Content-Length Hugging Face reported for each URL.
+/// The tier preselected when no model is installed: the smallest.
+pub const DEFAULT_MODEL: &str = "low";
+
+// Sizes and sha256 digests are the LFS metadata Hugging Face reports for each file.
 pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
-        id: "qwen3-4b",
-        name: "Qwen3 4B (Q4_K_M)",
-        url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
-        size: 2_497_280_256,
+        id: "low",
+        name: "Low",
+        model: "Qwen3.5 0.8B (Q4_0)",
+        note: "Leve e rápido: roda em quase qualquer máquina (cerca de 2 GB de RAM livre). Bom para testar e para pedidos simples; erra mais em código e em chamadas de ferramenta.",
+        filename: "Qwen3.5-0.8B-Q4_0.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_0.gguf",
+        size: 507_154_688,
+        sha256: "444406ddd926550c724ec18d5120a9d40ded44908a063b0e66e9a7e5464c652c",
     },
     CatalogModel {
-        id: "gemma3-4b",
-        name: "Gemma 3 4B it (Q4_K_M)",
-        url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
-        size: 2_489_757_856,
+        id: "medium",
+        name: "Medium",
+        model: "Qwen3.5 4B (Q4_0)",
+        note: "Equilíbrio entre qualidade e velocidade. Recomendado com 8 GB de RAM ou mais.",
+        filename: "Qwen3.5-4B-Q4_0.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_0.gguf",
+        size: 2_583_221_408,
+        sha256: "298fcb5fe7a77ccc79745ae24751560c5ac56874caff4bb39b1f2055bd72b8bb",
     },
     CatalogModel {
-        id: "qwen2.5-coder-7b",
-        name: "Qwen2.5-Coder 7B Instruct (Q4_K_M)",
-        url: "https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
-        size: 4_683_074_336,
-    },
-    CatalogModel {
-        id: "qwen3-8b",
-        name: "Qwen3 8B (Q4_K_M)",
-        url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
-        size: 5_027_783_488,
+        id: "high",
+        name: "High",
+        model: "Qwen3.5 9B (Q4_0)",
+        note: "Melhor qualidade para criar gadgets, porém mais lento. Recomendado com 16 GB de RAM ou uma GPU.",
+        filename: "Qwen3.5-9B-Q4_0.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_0.gguf",
+        size: 5_379_417_312,
+        sha256: "17670346b4260ddcb0173965145155885024f3c9a4a24389a3370751edbcde24",
     },
 ];
 
-/// A model file name is joined onto the models directory, so it must stay a single path segment.
-pub fn validate_filename(name: &str) -> Result<(), String> {
-    let stem = name.strip_suffix(".gguf").unwrap_or("");
-    if stem.is_empty()
-        || stem.starts_with('.')
-        || name.chars().any(|c| matches!(c, '/' | '\\' | ':' | '\0'))
-    {
-        return Err(format!("Nome de arquivo inválido: {name}"));
-    }
-    Ok(())
-}
-
-pub fn validate_url(url: &str) -> Result<(), String> {
-    match url.strip_prefix("https://") {
-        Some(rest) if !rest.is_empty() && !url.contains(char::is_whitespace) => Ok(()),
-        _ => Err("Apenas URLs https:// são aceitas".into()),
-    }
+pub fn catalog_model(id: &str) -> Result<&'static CatalogModel, String> {
+    CATALOG.iter().find(|m| m.id == id).ok_or_else(|| format!("Modelo desconhecido: {id}"))
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
@@ -136,23 +135,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn filenames() {
-        assert!(validate_filename("Qwen3-4B-Q4_K_M.gguf").is_ok());
-        for bad in ["../x.gguf", "a/b.gguf", "a\\b.gguf", "C:x.gguf", "x.bin", ".gguf", ".hidden.gguf", "x.gguf.part", ""] {
-            assert!(validate_filename(bad).is_err(), "{bad} should be rejected");
+    fn catalog() {
+        assert_eq!(CATALOG.iter().map(|m| m.name).collect::<Vec<_>>(), ["Low", "Medium", "High"]);
+        let default = catalog_model(DEFAULT_MODEL).unwrap();
+        assert!(CATALOG.iter().all(|m| m.size >= default.size), "the default is the smallest");
+        for m in CATALOG {
+            assert!(m.url.starts_with("https://") && m.url.ends_with(&format!("/{}", m.filename)), "{}", m.id);
+            assert!(m.filename.contains("Q4_0") && m.sha256.len() == 64, "{}", m.id);
         }
-        for model in CATALOG {
-            let file = model.url.rsplit('/').next().unwrap();
-            assert!(validate_filename(file).is_ok() && validate_url(model.url).is_ok(), "{}", model.id);
-        }
-    }
-
-    #[test]
-    fn urls() {
-        assert!(validate_url("https://huggingface.co/x.gguf").is_ok());
-        for bad in ["http://huggingface.co/x.gguf", "file:///etc/passwd", "https://", "https://a b", "HTTPS://x"] {
-            assert!(validate_url(bad).is_err(), "{bad} should be rejected");
-        }
+        assert!(catalog_model("x").is_err());
     }
 
     #[test]

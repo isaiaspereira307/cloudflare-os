@@ -1,10 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use desktop_core::{validate_filename, validate_url, CatalogModel, LlamaEvent, LlamaState, RuntimeManifest, CATALOG};
+use desktop_core::{catalog_model, CatalogModel, LlamaEvent, LlamaState, RuntimeManifest, CATALOG, DEFAULT_MODEL};
 use serde::Serialize;
-use std::collections::{HashSet, VecDeque};
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -35,7 +36,8 @@ struct Llama {
 #[derive(Default)]
 struct AppState {
     llama: Mutex<Llama>,
-    downloads: Mutex<HashSet<String>>,
+    /// The catalog id being downloaded; one at a time, since installing replaces the model.
+    downloading: Mutex<Option<&'static str>>,
     workshop: Mutex<Option<Child>>,
 }
 
@@ -46,16 +48,18 @@ struct LlamaStatus {
 }
 
 #[derive(Serialize, Clone)]
-struct DownloadProgress<'a> {
-    filename: &'a str,
+struct DownloadProgress {
+    id: &'static str,
     received: u64,
     total: Option<u64>,
 }
 
 #[derive(Serialize)]
-struct Downloaded {
-    filename: String,
-    size: u64,
+struct Catalog {
+    models: &'static [CatalogModel],
+    default: &'static str,
+    installed: Option<&'static str>,
+    downloading: Option<&'static str>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -81,115 +85,131 @@ fn stop(app: &AppHandle, llama: &mut Llama) {
     let _ = transition(app, llama, LlamaEvent::Stop);
 }
 
-#[tauri::command]
-fn list_catalog() -> &'static [CatalogModel] {
-    CATALOG
+fn installed(dir: &Path) -> Option<&'static CatalogModel> {
+    CATALOG.iter().find(|m| dir.join(m.filename).is_file())
 }
 
 #[tauri::command]
-fn list_downloaded(app: AppHandle) -> Result<Vec<Downloaded>, String> {
-    let Ok(entries) = std::fs::read_dir(models_dir(&app)?) else {
-        return Ok(vec![]);
-    };
-    let mut models: Vec<Downloaded> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let filename = entry.file_name().into_string().ok()?;
-            validate_filename(&filename).ok()?;
-            Some(Downloaded { size: entry.metadata().ok()?.len(), filename })
-        })
-        .collect();
-    models.sort_by(|a, b| a.filename.cmp(&b.filename));
-    Ok(models)
+fn catalog(app: AppHandle) -> Result<Catalog, String> {
+    Ok(Catalog {
+        models: CATALOG,
+        default: DEFAULT_MODEL,
+        installed: installed(&models_dir(&app)?).map(|m| m.id),
+        downloading: *app.state::<AppState>().downloading.lock().unwrap(),
+    })
 }
 
+/// Downloads a catalog model and makes it the only one installed, restarting llama-server on it
+/// if it was running.
 #[tauri::command]
-async fn download_model(app: AppHandle, url: String, filename: String) -> Result<(), String> {
-    validate_url(&url)?;
-    validate_filename(&filename)?;
+async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
+    let model = catalog_model(&id)?;
     let state = app.state::<AppState>();
-    if !state.downloads.lock().unwrap().insert(filename.clone()) {
-        return Err(format!("{filename} já está sendo baixado"));
+    {
+        let mut downloading = state.downloading.lock().unwrap();
+        if downloading.is_some() {
+            return Err("Já existe um download em andamento".into());
+        }
+        *downloading = Some(model.id);
     }
-    let result = download(&app, &url, &filename).await;
-    state.downloads.lock().unwrap().remove(&filename);
-    result
-}
+    let result = download(&app, model).await;
+    *state.downloading.lock().unwrap() = None;
+    result?;
 
-/// Streams into `<file>.part`, resuming with a Range request when a partial file exists.
-async fn download(app: &AppHandle, url: &str, filename: &str) -> Result<(), String> {
-    let dir = models_dir(app)?;
-    tokio::fs::create_dir_all(&dir).await.map_err(err)?;
-    let part = dir.join(format!("{filename}.part"));
-    let offset = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
-
-    let client = reqwest::Client::builder().https_only(true).build().map_err(err)?;
-    let mut request = client.get(url);
-    if offset > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-    }
-    let mut response = request.send().await.map_err(err)?;
-    let status = response.status();
-    let (mut file, mut received) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        let file = tokio::fs::OpenOptions::new().append(true).open(&part).await.map_err(err)?;
-        (file, offset)
-    } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && offset > 0 {
-        // The partial file already holds every byte.
-        return tokio::fs::rename(&part, dir.join(filename)).await.map_err(err);
-    } else if status.is_success() {
-        (tokio::fs::File::create(&part).await.map_err(err)?, 0)
-    } else {
-        return Err(format!("Falha no download: HTTP {status}"));
-    };
-
-    let total = response.content_length().map(|len| len + received);
-    let mut reported = received;
-    while let Some(chunk) = response.chunk().await.map_err(err)? {
-        file.write_all(&chunk).await.map_err(err)?;
-        received += chunk.len() as u64;
-        if received - reported >= 4 << 20 {
-            reported = received;
-            let _ = app.emit("download-progress", DownloadProgress { filename, received, total });
+    let dir = models_dir(&app)?;
+    let mut llama = state.llama.lock().unwrap();
+    let was_running = llama.state.model().is_some();
+    stop(&app, &mut llama);
+    for entry in std::fs::read_dir(&dir).map_err(err)?.flatten() {
+        if entry.file_name() != model.filename {
+            std::fs::remove_file(entry.path()).map_err(err)?;
         }
     }
-    file.flush().await.map_err(err)?;
-    drop(file);
-    if total.is_some_and(|total| total != received) {
-        return Err(format!("Download incompleto ({received} de {total:?} bytes); tente novamente para continuar"));
+    if was_running {
+        start(&app, &mut llama, model)?;
     }
-    tokio::fs::rename(&part, dir.join(filename)).await.map_err(err)?;
-    let _ = app.emit("download-progress", DownloadProgress { filename, received, total });
+    Ok(())
+}
+
+/// Streams into `<file>.part`, resuming with a Range request when a partial file exists, and
+/// checks the result against the catalog's digest before renaming it into place.
+async fn download(app: &AppHandle, model: &'static CatalogModel) -> Result<(), String> {
+    let dir = models_dir(app)?;
+    tokio::fs::create_dir_all(&dir).await.map_err(err)?;
+    let part = dir.join(format!("{}.part", model.filename));
+    let offset = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+    let progress = |received| DownloadProgress { id: model.id, received, total: Some(model.size) };
+
+    if offset < model.size {
+        let client = reqwest::Client::builder().https_only(true).build().map_err(err)?;
+        let mut request = client.get(model.url);
+        if offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let mut response = request.send().await.map_err(err)?;
+        let status = response.status();
+        let (mut file, mut received) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            (tokio::fs::OpenOptions::new().append(true).open(&part).await.map_err(err)?, offset)
+        } else if status.is_success() {
+            (tokio::fs::File::create(&part).await.map_err(err)?, 0)
+        } else {
+            return Err(format!("Falha no download: HTTP {status}"));
+        };
+        let mut reported = received;
+        while let Some(chunk) = response.chunk().await.map_err(err)? {
+            file.write_all(&chunk).await.map_err(err)?;
+            received += chunk.len() as u64;
+            if received - reported >= 4 << 20 {
+                reported = received;
+                let _ = app.emit("download-progress", progress(received));
+            }
+        }
+        file.flush().await.map_err(err)?;
+        if received != model.size {
+            return Err(format!(
+                "Download incompleto ({received} de {} bytes); tente novamente para continuar",
+                model.size
+            ));
+        }
+    }
+
+    let hashed = part.clone();
+    let digest = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<String> {
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut std::fs::File::open(hashed)?, &mut hasher)?;
+        Ok(format!("{:x}", hasher.finalize()))
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    if digest != model.sha256 {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(format!("O arquivo baixado de {} está corrompido; baixe de novo", model.name));
+    }
+    tokio::fs::rename(&part, dir.join(model.filename)).await.map_err(err)?;
+    let _ = app.emit("download-progress", progress(model.size));
     Ok(())
 }
 
 #[tauri::command]
-fn delete_model(app: AppHandle, filename: String) -> Result<(), String> {
-    validate_filename(&filename)?;
-    if app.state::<AppState>().llama.lock().unwrap().state.model() == Some(filename.as_str()) {
-        return Err("Pare o llama-server antes de apagar o modelo em uso".into());
-    }
-    std::fs::remove_file(models_dir(&app)?.join(filename)).map_err(err)
-}
-
-#[tauri::command]
-fn start_llama(app: AppHandle, filename: String) -> Result<(), String> {
-    validate_filename(&filename)?;
-    let model = models_dir(&app)?.join(&filename);
-    if !model.is_file() {
-        return Err(format!("Modelo não encontrado: {filename}"));
-    }
-    let dir = app.path().resource_dir().map_err(err)?.join("llama");
-
+fn start_llama(app: AppHandle) -> Result<(), String> {
+    let model = installed(&models_dir(&app)?).ok_or("Nenhum modelo instalado")?;
     let state = app.state::<AppState>();
     let mut llama = state.llama.lock().unwrap();
-    stop(&app, &mut llama);
+    start(&app, &mut llama, model)
+}
+
+fn start(app: &AppHandle, llama: &mut Llama, model: &'static CatalogModel) -> Result<(), String> {
+    let path = models_dir(app)?.join(model.filename);
+    let dir = app.path().resource_dir().map_err(err)?.join("llama");
+    stop(app, llama);
     llama.logs.clear();
-    transition(&app, &mut llama, LlamaEvent::Start(filename))?;
+    transition(app, llama, LlamaEvent::Start(model.name.to_string()))?;
 
     let mut command = Command::new(dir.join(LLAMA_BIN));
     command
         .arg("-m")
-        .arg(&model)
+        .arg(&path)
         .args(["--host", "127.0.0.1", "--port", LLAMA_PORT, "--jinja", "-c", "32768", "-ngl", "99"])
         .current_dir(&dir)
         .stdin(Stdio::null())
@@ -205,25 +225,29 @@ fn start_llama(app: AppHandle, filename: String) -> Result<(), String> {
         Ok(child) => child,
         Err(e) => {
             let error = format!("Não foi possível iniciar {}: {e}", dir.join(LLAMA_BIN).display());
-            transition(&app, &mut llama, LlamaEvent::Exited(error.clone()))?;
+            transition(app, llama, LlamaEvent::Exited(error.clone()))?;
             return Err(error);
         }
     };
-    pipe_logs(&app, child.stdout.take());
-    pipe_logs(&app, child.stderr.take());
+    pipe_logs(app, child.stdout.take(), llama.generation);
+    pipe_logs(app, child.stderr.take(), llama.generation);
     llama.child = Some(child);
     tauri::async_runtime::spawn(monitor(app.clone(), llama.generation));
     Ok(())
 }
 
-fn pipe_logs(app: &AppHandle, stream: Option<impl Read + Send + 'static>) {
+/// Lines a killed process still had buffered are dropped, so a restart starts with a clean log.
+fn pipe_logs(app: &AppHandle, stream: Option<impl Read + Send + 'static>, generation: u64) {
     let Some(stream) = stream else { return };
     let app = app.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
-            let _ = app.emit("llama-log", &line);
             let state = app.state::<AppState>();
             let mut llama = state.llama.lock().unwrap();
+            if llama.generation != generation {
+                return;
+            }
+            let _ = app.emit("llama-log", &line);
             if llama.logs.len() == LOG_LINES {
                 llama.logs.pop_front();
             }
@@ -366,10 +390,8 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
-            list_catalog,
-            list_downloaded,
+            catalog,
             download_model,
-            delete_model,
             start_llama,
             stop_llama,
             llama_status,

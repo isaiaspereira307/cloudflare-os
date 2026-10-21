@@ -1237,8 +1237,12 @@ export type CloudflareAccountOption = {
   accountName: string;
 };
 
-/** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+/**
+ * Supported AI providers. "ollama" and "llamacpp" (llama.cpp's `llama-server`) are servers the
+ * user runs themselves, reached over their OpenAI-compatible API; AI Gateway cannot serve them.
+ */
+export type AiModelProvider =
+  "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "llamacpp";
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
@@ -1341,6 +1345,8 @@ const SUGGESTED_MODEL_CATALOG = {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
   },
   "ollama": {
+  },
+  "llamacpp": {
   },
 } satisfies Record<AiModelProvider, Record<string, SuggestedModel>>;
 

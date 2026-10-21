@@ -134,6 +134,7 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
+    case "llamacpp": return undefined;
     default: return undefined;
   }
 }
@@ -174,7 +175,7 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
 // provider's native API, and the translation drops provider features pi relies on (extended
 // thinking, Anthropic cache_control prompt caching, the OpenAI Responses API). Billing --
 // including unified billing on a user's own gateway -- is orthogonal to which API a request
-// speaks. Returns undefined for providers AI Gateway cannot serve (ollama).
+// speaks. Returns undefined for providers AI Gateway cannot serve (ollama, llamacpp).
 function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Api> | undefined {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
@@ -504,6 +505,37 @@ function getModelViaGateway(
   });
 }
 
+// An OpenAI-compatible server the user runs themselves (Ollama, llama.cpp), reached at
+// `serverBase`/v1. When no API key was configured we assume local auth and send no Authorization
+// header at all (as before the pi migration; a strict local proxy may reject an unexpected bearer
+// token): the OpenAI SDK requires *some* key, so give it a placeholder while a null default header
+// deletes the Authorization header the SDK derives from it.
+function localServerHandle(
+  config: AiModelConfig,
+  window: { contextWindow: number, maxTokens: number },
+  sessionAffinity: string | undefined,
+  server: { provider: string, serverBase: string, compat: OpenAICompletionsCompat | undefined },
+): ModelHandle {
+  return makeHandle({
+    model: {
+      id: config.model,
+      name: config.model,
+      api: "openai-completions",
+      provider: server.provider,
+      baseUrl: `${server.serverBase}/v1`,
+      reasoning: true,
+      input: ["text", "image"],
+      cost: ZERO_COST,
+      compat: server.compat,
+      ...window,
+    },
+    ...(config.apiToken === ""
+        ? { apiKey: "unused", headers: { Authorization: null } }
+        : { apiKey: config.apiToken }),
+    sessionAffinity,
+  });
+}
+
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
 function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
@@ -575,51 +607,45 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
       // `apiUrl` is the Ollama server base; its OpenAI-compat endpoint lives under /v1. Accept
       // (and strip) a trailing `/api` or `/v1` path: configs saved before the pi migration store
       // the native-API base `http://host:11434/api` (the old ollama provider's convention), and
-      // users may paste the /v1 endpoint directly. When no API key was configured we assume
-      // local auth and send no Authorization header at all (as before the pi migration; a strict
-      // local proxy may reject an unexpected bearer token): the OpenAI SDK requires *some* key,
-      // so give it a placeholder while a null default header deletes the Authorization header
-      // the SDK derives from it.
-      return makeHandle({
-        model: {
-          id: config.model,
-          name: config.model,
-          api: "openai-completions",
-          provider: "ollama",
-          baseUrl: `${stripTrailingSlashes(config.apiUrl ?? "http://localhost:11434")
-              .replace(/\/(api|v1)$/, "")}/v1`,
-          reasoning: true,
-          input: ["text", "image"],
-          cost: ZERO_COST,
+      // users may paste the /v1 endpoint directly.
+      return localServerHandle(config, window, sessionAffinity, {
+        provider: "ollama",
+        serverBase: stripTrailingSlashes(config.apiUrl ?? "http://localhost:11434")
+            .replace(/\/(api|v1)$/, ""),
 
-          // Pi's OpenAI compat uses the "developer" role for the system prompt by default,
-          // disabling it only for certain hostnames which are known not to support it.
-          //
-          // In ollama, some models support it and some do not. Frustratingly, the ones that do not
-          // don't necessarily throw an error. They may just proceed without a system prompt. For
-          // example, when I tested Muse Glimmer the day after it was released, I found it
-          // understood what tool calls were available to it but didn't know any of the info in
-          // the system prompt. Annoyingly, Muse Glimmer seems to be trained to treat the system
-          // prompt as secret, so refused to answer my questions about it directly. But I figured
-          // out it clearly wasn't getting the system prompt. And when I disabled  the "developer"
-          // role, the problem was fixed. In contrast, though, Gemma 4 running under otherwise
-          // exactly the same setup does understand the "developer" role and works fine. Weird!
-          //
-          // Some users also filed issues about this because they were trying to use the ollama
-          // provider as a way to target an arbitrary third-party OpenAI-compatible provider. This
-          // is not the intended use case for the ollama provider -- we should add an explicit
-          // provider for this. The ollama provider could in the future switch to using the ollama
-          // native API rather than the OpenAI-compatible endpoint, which would break users using
-          // it in this way. That said, if this flag works as a temporary work-around for them
-          // util we add a real OpenAI provider option... great.
-          compat: catalog?.compat ?? {supportsDeveloperRole: false},
-
-          ...window,
-        },
-        ...(config.apiToken === ""
-            ? { apiKey: "unused", headers: { Authorization: null } }
-            : { apiKey: config.apiToken }),
-        sessionAffinity,
+        // Pi's OpenAI compat uses the "developer" role for the system prompt by default,
+        // disabling it only for certain hostnames which are known not to support it.
+        //
+        // In ollama, some models support it and some do not. Frustratingly, the ones that do not
+        // don't necessarily throw an error. They may just proceed without a system prompt. For
+        // example, when I tested Muse Glimmer the day after it was released, I found it
+        // understood what tool calls were available to it but didn't know any of the info in
+        // the system prompt. Annoyingly, Muse Glimmer seems to be trained to treat the system
+        // prompt as secret, so refused to answer my questions about it directly. But I figured
+        // out it clearly wasn't getting the system prompt. And when I disabled  the "developer"
+        // role, the problem was fixed. In contrast, though, Gemma 4 running under otherwise
+        // exactly the same setup does understand the "developer" role and works fine. Weird!
+        //
+        // Some users also filed issues about this because they were trying to use the ollama
+        // provider as a way to target an arbitrary third-party OpenAI-compatible provider. This
+        // is not the intended use case for the ollama provider -- we should add an explicit
+        // provider for this. The ollama provider could in the future switch to using the ollama
+        // native API rather than the OpenAI-compatible endpoint, which would break users using
+        // it in this way. That said, if this flag works as a temporary work-around for them
+        // util we add a real OpenAI provider option... great.
+        compat: catalog?.compat ?? {supportsDeveloperRole: false},
+      });
+    case "llamacpp":
+      // llama.cpp's `llama-server` serves its OpenAI-compat API under /v1 at the server root;
+      // accept (and strip) a pasted /v1 endpoint. Roles are rendered by each model's chat
+      // template, and not every template knows "developer" (see the ollama case); "system" is
+      // universally safe. The default port is 8089 (what the desktop app runs it on), not
+      // llama-server's own 8080, which other local services commonly hold.
+      return localServerHandle(config, window, sessionAffinity, {
+        provider: "llamacpp",
+        serverBase: stripTrailingSlashes(config.apiUrl ?? "http://127.0.0.1:8089")
+            .replace(/\/v1$/, ""),
+        compat: {supportsDeveloperRole: false},
       });
     case "openai":
       return makeHandle({

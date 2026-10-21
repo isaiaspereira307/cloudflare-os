@@ -503,6 +503,45 @@ describe("getModel direct routing (no gateway)", () => {
       expect(handle.model.baseUrl).toBe("http://my-ollama:11434/v1");
     }
   });
+
+  it("defaults a llama.cpp config to the local llama-server and strips a pasted /v1", () => {
+    for (const apiUrl of [undefined, "http://127.0.0.1:8089/", "http://127.0.0.1:8089/v1/"]) {
+      const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+        provider: "llamacpp",
+        model: "gemma-4",
+        apiToken: "",
+        apiUrl,
+      }, INITIATOR);
+      expect(handle.model.api).toBe("openai-completions");
+      expect(handle.model.baseUrl).toBe("http://127.0.0.1:8089/v1");
+    }
+  });
+
+  it("sends no Authorization header for a llama.cpp config without an API key", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "llamacpp",
+      model: "gemma-4",
+      apiToken: "",
+      apiUrl: "http://my-llama:8080",
+    }, INITIATOR);
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("http://my-llama:8080/v1/chat/completions");
+    expect(request.headers.get("authorization")).toBeNull();
+    expect(handle.model.compat).toEqual({ supportsDeveloperRole: false });
+  }, 15000);
+
+  it("sends the configured llama.cpp API key as a bearer token", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "llamacpp",
+      model: "gemma-4",
+      apiToken: "llama-token",
+      apiUrl: "http://my-llama:8080",
+    }, INITIATOR);
+
+    const request = await captureRequest(handle);
+    expect(request.headers.get("authorization")).toBe("Bearer llama-token");
+  }, 15000);
 });
 
 describe("PDF attachment bridging", () => {

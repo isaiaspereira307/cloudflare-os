@@ -1,10 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use desktop_core::{validate_filename, validate_url, CatalogModel, LlamaEvent, LlamaState, CATALOG};
+use desktop_core::{validate_filename, validate_url, CatalogModel, LlamaEvent, LlamaState, RuntimeManifest, CATALOG};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,12 +13,15 @@ use tokio::io::AsyncWriteExt;
 
 /// The Workshop's llama.cpp provider defaults to http://127.0.0.1:8089.
 const LLAMA_PORT: &str = "8089";
-const WORKSHOP_URL: &str = "http://localhost:8787";
 const LOG_LINES: usize = 40;
 #[cfg(windows)]
 const LLAMA_BIN: &str = "llama-server.exe";
 #[cfg(not(windows))]
 const LLAMA_BIN: &str = "llama-server";
+#[cfg(windows)]
+const WORKERD_BIN: &str = "workerd.exe";
+#[cfg(not(windows))]
+const WORKERD_BIN: &str = "workerd";
 
 #[derive(Default)]
 struct Llama {
@@ -273,79 +276,74 @@ fn llama_status(app: AppHandle) -> LlamaStatus {
     LlamaStatus { state: llama.state.clone(), logs: llama.logs.iter().cloned().collect() }
 }
 
-async fn workshop_answers(client: &reqwest::Client) -> bool {
-    client.get(WORKSHOP_URL).send().await.is_ok()
+fn workshop_log(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(err)?.join("workshop").join("workerd.log"))
 }
 
-/// Reuses a Workshop already listening on 8787, otherwise starts `pnpm run-local` and waits for it.
+/// Starts the bundled Workshop (`resources/workshop`, built by scripts/build-runtime.ts) unless it
+/// is already running. Its state lives in `<app data>/workshop`, workerd's working directory.
+fn start_workshop(app: &AppHandle) -> Result<String, String> {
+    let runtime_dir = app.path().resource_dir().map_err(err)?.join("workshop");
+    let manifest: RuntimeManifest = serde_json::from_slice(
+        &std::fs::read(runtime_dir.join("runtime.json"))
+            .map_err(|e| format!("Workshop não empacotado ({}): {e}", runtime_dir.display()))?,
+    )
+    .map_err(err)?;
+    let state = app.state::<AppState>();
+    let mut workshop = state.workshop.lock().unwrap();
+    if workshop.as_mut().is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none())) {
+        return Ok(manifest.origin());
+    }
+
+    let data_dir = app.path().app_data_dir().map_err(err)?.join("workshop");
+    std::fs::create_dir_all(&data_dir).map_err(err)?;
+    for dir in &manifest.dirs {
+        std::fs::create_dir_all(data_dir.join(dir)).map_err(err)?;
+    }
+    let log = std::fs::File::create(workshop_log(app)?).map_err(err)?;
+    let child = Command::new(runtime_dir.join(WORKERD_BIN))
+        .args(manifest.workerd_args(&runtime_dir))
+        .current_dir(&data_dir)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().map_err(err)?)
+        .stderr(log)
+        .spawn()
+        .map_err(|e| format!("Não foi possível iniciar o Workshop: {e}"))?;
+    *workshop = Some(child);
+    Ok(manifest.origin())
+}
+
+/// The end of workerd's log, which names the problem when it fails to start (e.g. the port is taken).
+fn log_tail(app: &AppHandle) -> String {
+    let log = workshop_log(app).and_then(|path| std::fs::read_to_string(path).map_err(err)).unwrap_or_default();
+    let start = log.len().saturating_sub(800);
+    log.get(start..).unwrap_or(&log).trim().to_string()
+}
+
 #[tauri::command]
 async fn open_workshop(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("workshop") {
         return window.set_focus().map_err(err);
     }
+    let origin = start_workshop(&app)?;
     let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().map_err(err)?;
-    if !workshop_answers(&client).await {
-        let state = app.state::<AppState>();
-        {
-            let mut workshop = state.workshop.lock().unwrap();
-            let running = workshop.as_mut().is_some_and(|child| child.try_wait().is_ok_and(|s| s.is_none()));
-            if !running {
-                *workshop = Some(spawn_run_local()?);
-            }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !client.get(&origin).send().await.is_ok_and(|r| r.status().is_success()) {
+        let exited = app.state::<AppState>().workshop.lock().unwrap().as_mut().and_then(|child| child.try_wait().ok().flatten());
+        if let Some(status) = exited {
+            return Err(format!("O Workshop saiu ({status}): {}", log_tail(&app)));
         }
-        // ponytail: no deadline; the first run-local installs and builds, which can take minutes.
-        while !workshop_answers(&client).await {
-            if let Some(child) = state.workshop.lock().unwrap().as_mut() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Err(format!("pnpm run-local saiu ({status}); veja o terminal"));
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        if tokio::time::Instant::now() > deadline {
+            return Err(format!("O Workshop não respondeu em {origin}: {}", log_tail(&app)));
         }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    WebviewWindowBuilder::new(&app, "workshop", WebviewUrl::External(WORKSHOP_URL.parse().unwrap()))
+    WebviewWindowBuilder::new(&app, "workshop", WebviewUrl::External(origin.parse().map_err(err)?))
         .title("Gadgets Workshop")
         .inner_size(1280.0, 860.0)
         .build()
         .map_err(err)?;
     Ok(())
-}
-
-fn repo_root() -> PathBuf {
-    std::env::var_os("GADGETS_REPO_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-}
-
-fn spawn_run_local() -> Result<Child, String> {
-    let root = repo_root();
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "pnpm", "run-local"]);
-        command
-    };
-    #[cfg(unix)]
-    let mut command = {
-        use std::os::unix::process::CommandExt;
-        let mut command = Command::new("pnpm");
-        command.arg("run-local").process_group(0);
-        command
-    };
-    command
-        .current_dir(&root)
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Não foi possível rodar pnpm run-local em {}: {e}", root.display()))
-}
-
-/// run-local spawns wrangler and workerd beneath pnpm, so the whole tree has to go.
-fn kill_tree(mut child: Child) {
-    #[cfg(unix)]
-    let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", child.id())]).status();
-    #[cfg(windows)]
-    let _ = Command::new("taskkill").args(["/PID", &child.id().to_string(), "/T", "/F"]).status();
-    let _ = child.wait();
 }
 
 fn main() {
@@ -361,9 +359,13 @@ fn main() {
             llama_status,
             open_workshop
         ])
-        // Ctrl-C or SIGTERM would otherwise skip RunEvent::Exit and orphan run-local, which runs in
-        // its own process group.
+        // Ctrl-C or SIGTERM would otherwise skip RunEvent::Exit and orphan workerd and llama-server.
         .setup(|app| {
+            // Started now so it is usually up by the time the user clicks Abrir Workshop, which
+            // reports any failure.
+            if let Err(e) = start_workshop(app.handle()) {
+                eprintln!("{e}");
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
@@ -388,13 +390,10 @@ fn main() {
             if let RunEvent::Exit = event {
                 let state = app.state::<AppState>();
                 let llama = state.llama.lock().unwrap().child.take();
-                if let Some(mut child) = llama {
+                let workshop = state.workshop.lock().unwrap().take();
+                for mut child in llama.into_iter().chain(workshop) {
                     let _ = child.kill();
                     let _ = child.wait();
-                }
-                let workshop = state.workshop.lock().unwrap().take();
-                if let Some(child) = workshop {
-                    kill_tree(child);
                 }
             }
         });

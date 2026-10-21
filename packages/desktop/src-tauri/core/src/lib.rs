@@ -1,4 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::path::Path;
 
 #[derive(Serialize)]
 pub struct CatalogModel {
@@ -93,6 +95,42 @@ impl LlamaState {
     }
 }
 
+/// `runtime.json`, written by `scripts/build-runtime.ts` next to the workerd config.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeManifest {
+    pub port: u16,
+    /// The disk service that serves the frontend; the config names it by a build-machine path.
+    pub assets_service: String,
+    /// Directories, relative to workerd's working directory, that its disk services need to exist.
+    pub dirs: Vec<String>,
+}
+
+impl RuntimeManifest {
+    pub fn origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Arguments for `workerd` started in the state directory, so the config's relative
+    /// persistence paths land there.
+    pub fn workerd_args(&self, runtime_dir: &Path) -> Vec<OsString> {
+        let mut assets = OsString::from(format!("--directory-path={}=", self.assets_service));
+        assets.push(runtime_dir.join("assets"));
+        vec![
+            "serve".into(),
+            "--binary".into(),
+            // Miniflare's simulators use compatibility flags that have no default-on date.
+            "--experimental".into(),
+            runtime_dir.join("config.bin").into(),
+            assets,
+            format!("--socket-addr=entry=127.0.0.1:{}", self.port).into(),
+            // Miniflare's Node-side loopback server, which only dev-time features call. Port 9
+            // (discard) refuses connections, so those calls fail fast instead of reaching anything.
+            "--external-addr=loopback=127.0.0.1:9".into(),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +172,20 @@ mod tests {
         let restarted = failed.next(LlamaEvent::Start(m())).unwrap();
         assert_eq!(restarted, LlamaState::Starting { model: m() });
         assert_eq!(restarted.next(LlamaEvent::Stop).unwrap(), LlamaState::Stopped);
+    }
+
+    #[test]
+    fn workerd_args() {
+        let manifest: RuntimeManifest =
+            serde_json::from_str(r#"{"port": 8797, "assetsService": "assets:storage", "dirs": ["state/do"]}"#).unwrap();
+        assert_eq!(manifest.origin(), "http://127.0.0.1:8797");
+        let args: Vec<String> = manifest
+            .workerd_args(Path::new("/opt/app/workshop"))
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        assert_eq!(args[3], "/opt/app/workshop/config.bin");
+        assert!(args.contains(&"--directory-path=assets:storage=/opt/app/workshop/assets".to_string()));
+        assert!(args.contains(&"--socket-addr=entry=127.0.0.1:8797".to_string()));
     }
 }

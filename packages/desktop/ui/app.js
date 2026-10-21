@@ -118,7 +118,7 @@ $("stop").addEventListener("click", () => invoke("stop_llama").catch(showError))
 $("workshop").addEventListener("click", async () => {
   showError();
   $("workshop").disabled = true;
-  $("workshop-status").textContent = "Iniciando o Workshop (a primeira vez pode levar alguns minutos)…";
+  $("workshop-status").textContent = "Iniciando o Workshop…";
   try {
     await invoke("open_workshop");
     $("workshop-status").textContent = "";

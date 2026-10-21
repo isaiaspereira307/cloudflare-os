@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tauri dev",
     "tauri": "tauri",
-    "fetch-llama": "node scripts/fetch-llama-server.ts"
+    "fetch-llama": "node scripts/fetch-llama-server.ts",
+    "build-runtime": "node scripts/build-runtime.ts"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.1"

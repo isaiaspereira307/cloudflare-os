@@ -301,7 +301,23 @@ fn start_workshop(app: &AppHandle) -> Result<String, String> {
         std::fs::create_dir_all(data_dir.join(dir)).map_err(err)?;
     }
     let log = std::fs::File::create(workshop_log(app)?).map_err(err)?;
-    let child = Command::new(runtime_dir.join(WORKERD_BIN))
+    let mut command = Command::new(runtime_dir.join(WORKERD_BIN));
+    // If the app dies without RunEvent::Exit (a crash, SIGKILL), an orphaned workerd would keep the
+    // port and make the next launch fail, so the kernel kills it with us. The signal follows the
+    // spawning *thread*; both callers run on the main thread or a tokio worker, which live as long
+    // as the app.
+    // ponytail: Linux only; macOS and Windows still orphan it on a hard kill (job objects / kqueue).
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
         .args(manifest.workerd_args(&runtime_dir))
         .current_dir(&data_dir)
         .stdin(Stdio::null())

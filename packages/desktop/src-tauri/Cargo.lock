@@ -941,6 +941,7 @@ name = "gadgets-desktop"
 version = "0.0.0"
 dependencies = [
  "desktop-core",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

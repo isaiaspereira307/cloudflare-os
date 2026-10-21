@@ -22,6 +22,7 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
   ollama: 'Ollama',
+  llamacpp: 'llama.cpp',
 }
 
 // Placeholder hinting at the shape of each provider's API token.
@@ -31,10 +32,18 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
+  llamacpp: '(optional)',
+}
+
+// Providers that are servers the user runs themselves, with their default URLs. They need a URL
+// rather than an API key.
+const LOCAL_SERVER_DEFAULT_URLS: Partial<Record<AiModelProvider, string>> = {
+  ollama: 'http://localhost:11434',
+  llamacpp: 'http://127.0.0.1:8089',
 }
 
 // Example used in the custom-model placeholders for providers that have no suggested models
-// (currently Ollama, which serves whatever the user has pulled locally).
+// (the local servers, which serve whatever models the user has installed).
 const FALLBACK_EXAMPLE_MODEL = { modelId: 'gemma4:31b', name: 'Gemma 4 31B' }
 
 // Pick an example model to show in the custom-model placeholders for the given provider.
@@ -109,6 +118,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Advanced settings collapsible state
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
+  const localServerUrl = selection ? LOCAL_SERVER_DEFAULT_URLS[selection.provider] : undefined
+  const isLocalServer = localServerUrl !== undefined
+
   const gatewayMode = aiConfig?.enabled === true
   const enabledProviders: Set<string> | null = gatewayMode
     ? new Set(aiConfig.enabledProviders)
@@ -144,7 +156,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     }
     setApiToken('')
     setAccountId('')
-    setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434' : '')
+    setApiUrl(LOCAL_SERVER_DEFAULT_URLS[sel.provider] ?? '')
   }
 
   const validate = (): boolean => {
@@ -159,11 +171,10 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       if (!displayName.trim()) newErrors.displayName = 'Please enter a display name'
     }
 
-    const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
     const showCredentials = !gatewayMode
 
-    if (showCredentials && selection && !isOllama && !apiToken.trim()) {
+    if (showCredentials && selection && !isLocalServer && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
     }
 
@@ -171,8 +182,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       newErrors.accountId = 'Please enter your Cloudflare account ID'
     }
 
-    if (showCredentials && isOllama && !apiUrl.trim()) {
-      newErrors.apiUrl = 'Please enter the Ollama API URL'
+    if (showCredentials && selection && isLocalServer && !apiUrl.trim()) {
+      newErrors.apiUrl = `Please enter the ${PROVIDER_LABELS[selection.provider]} API URL`
     }
 
     setErrors(newErrors)
@@ -216,7 +227,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const options = buildOptions(gatewayMode, enabledProviders)
   const showCustomFields = selection?.type === 'custom'
   const example = selection ? exampleModel(selection.provider) : null
-  const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
   const showCredentials = !gatewayMode
 
@@ -313,8 +323,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               label="API Token"
               placeholder={API_TOKEN_PLACEHOLDERS[selection.provider]}
               description={
-                isOllama
-                  ? 'Optional for local Ollama access'
+                isLocalServer
+                  ? `Optional for local ${PROVIDER_LABELS[selection.provider]} access`
                   : isCloudflare
                   ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
                   : `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
@@ -326,12 +336,12 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             />
           )}
 
-          {/* Ollama API URL (always visible for Ollama) */}
-          {showCredentials && isOllama && (
+          {/* Local server URL (always visible for local servers) */}
+          {showCredentials && selection && isLocalServer && (
             <Input
               label="API URL"
-              placeholder="http://localhost:11434"
-              description="URL of your Ollama server"
+              placeholder={localServerUrl}
+              description={`URL of your ${PROVIDER_LABELS[selection.provider]} server`}
               value={apiUrl}
               onChange={(e) => { setApiUrl(e.target.value); setErrors(prev => ({ ...prev, apiUrl: '' })) }}
               error={errors.apiUrl}
@@ -339,8 +349,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             />
           )}
 
-          {/* Advanced Settings for non-Ollama, non-Cloudflare providers */}
-          {showCredentials && selection && !isOllama && !isCloudflare && (
+          {/* Advanced Settings for remote providers other than Cloudflare */}
+          {showCredentials && selection && !isLocalServer && !isCloudflare && (
             <Collapsible.Root
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}

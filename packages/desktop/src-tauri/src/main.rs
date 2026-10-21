@@ -11,8 +11,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tokio::io::AsyncWriteExt;
 
-/// The Workshop's llama.cpp provider defaults to http://127.0.0.1:8080.
-const LLAMA_PORT: &str = "8080";
+/// The Workshop's llama.cpp provider defaults to http://127.0.0.1:8089.
+const LLAMA_PORT: &str = "8089";
 const WORKSHOP_URL: &str = "http://localhost:8787";
 const LOG_LINES: usize = 40;
 #[cfg(windows)]

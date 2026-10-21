@@ -23,7 +23,7 @@ pnpm --filter @gadgets/desktop dev
 
 No app, baixe um modelo do catálogo (ou cole a URL https de um GGUF), selecione-o e clique em
 Iniciar. Quando o status ficar "pronto", clique em Abrir Workshop e, lá, adicione um modelo com o
-provedor **llama.cpp** e a URL `http://127.0.0.1:8080`.
+provedor **llama.cpp** e a URL `http://127.0.0.1:8089`.
 
 Os modelos ficam em `<app data>/models/` (no Linux, `~/.local/share/dev.gadgets.desktop/models/`).
 Um download interrompido continua de onde parou ao clicar em Baixar de novo.

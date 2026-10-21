@@ -14,7 +14,7 @@
 // Usage: node scripts/build-runtime.ts
 
 import { execFile } from "node:child_process";
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
@@ -76,8 +76,11 @@ async function pnpm(args: string[], cwd = ROOT): Promise<void> {
 // the router serves. The password-login frontend, as run-local builds it.
 await pnpm(["exec", "vp", "run", "--cache", "@gadgets/typed-storage#build"]);
 await pnpm(["exec", "vp", "run", "--cache", "@gadgets/workshop-frontend#build:assets"]);
-for (const name of ["workshop-backend", ...GATEKEEPERS]) {
-  await pnpm(["exec", "vp", "run", "--cache", `@gadgets/${name}#build`]);
+// By package name, which is not always `@gadgets/<dir>` (`@gadgets/mcp-gatekeeper`), and a
+// `vp run` naming no package exits 0 having built nothing.
+for (const dir of ["workshop-backend", ...GATEKEEPERS]) {
+  const { name } = JSON.parse(readFileSync(join(PACKAGES_DIR, dir, "package.json"), "utf8"));
+  await pnpm(["exec", "vp", "run", "--cache", `${name}#build`]);
 }
 
 /** A worker's normalized wrangler config, adjusted for the desktop. */

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gadgets Desktop</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 760px; margin: 0 auto; padding: 16px; }
+    section { margin-bottom: 24px; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { display: flex; gap: 8px; align-items: center; padding: 6px 0; flex-wrap: wrap; }
+    li .name { flex: 1; min-width: 200px; }
+    progress { width: 100%; }
+    form { display: flex; gap: 8px; }
+    form input { flex: 1; }
+    pre { max-height: 220px; overflow: auto; font-size: 12px; padding: 8px; border: 1px solid #8884; }
+    .error { color: #c33; }
+    .hint { opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <h1>Gadgets Desktop</h1>
+
+  <section>
+    <h2>Catálogo de modelos</h2>
+    <ul id="catalog"></ul>
+    <form id="custom">
+      <input id="custom-url" type="url" placeholder="ou cole a URL de um GGUF (https://...)" aria-label="URL de um arquivo GGUF" required>
+      <button type="submit">Baixar</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Modelos baixados</h2>
+    <ul id="downloaded"></ul>
+  </section>
+
+  <section>
+    <h2>llama-server</h2>
+    <p>Status: <strong id="status" role="status"></strong></p>
+    <p>
+      <button id="start" type="button">Iniciar</button>
+      <button id="stop" type="button">Parar</button>
+    </p>
+    <pre id="logs" aria-label="Últimas linhas do log"></pre>
+  </section>
+
+  <section>
+    <h2>Workshop</h2>
+    <p class="hint">No Workshop, adicione um modelo com o provedor <strong>llama.cpp</strong> e a URL <code>http://127.0.0.1:8080</code>.</p>
+    <button id="workshop" type="button">Abrir Workshop</button>
+    <span id="workshop-status" role="status"></span>
+  </section>
+
+  <p id="error" class="error" role="alert"></p>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

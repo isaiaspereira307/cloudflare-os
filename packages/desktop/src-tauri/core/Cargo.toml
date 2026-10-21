@@ -1,0 +1,8 @@
+[package]
+name = "desktop-core"
+version = "0.0.0"
+edition = "2021"
+
+# Pure logic, kept out of the Tauri crate so `cargo test -p desktop-core` builds without webkit.
+[dependencies]
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "IPC for the local setup window only. The Workshop window loads a remote URL and gets none.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

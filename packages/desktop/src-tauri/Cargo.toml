@@ -1,0 +1,17 @@
+[package]
+name = "gadgets-desktop"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+members = ["core"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+desktop-core = { path = "core" }
+tauri = { version = "=2.12.1", features = [] }
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["fs", "io-util", "signal", "time"] }

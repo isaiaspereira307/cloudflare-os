@@ -3,6 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   stripTrailingSlashes,
+  workerVersionTag,
   type AccountDescription,
   type ConnectHandoff,
   type Gatekeeper,
@@ -15,8 +16,10 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { buildDescription, codeSpan } from "@gadgets/gatekeeper-kit/action-description";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { clearCredentialExpiryLatch, notifyCredentialsExpiredOnce } from "@gadgets/gatekeeper-kit/credential-expiry";
 import {
   SupabaseApi,
   SupabaseApiError,
@@ -371,6 +374,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
+  }
+
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
@@ -410,7 +417,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
-    this.ctx.storage.kv.put("expiredNotified", false);
+    clearCredentialExpiryLatch(this.ctx.storage.kv);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -474,7 +481,7 @@ export class UserAccount extends DurableObject<Env> {
       handoff = await callback.reconnectComplete(stageId);
     } else {
       this.#storeGrant(grant);
-      this.ctx.storage.kv.put("expiredNotified", false);
+      clearCredentialExpiryLatch(this.ctx.storage.kv);
       try {
         const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
         handoff = await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
@@ -495,7 +502,7 @@ export class UserAccount extends DurableObject<Env> {
     const grant = commitStagedCredentials<StoredGrant>(this.ctx.storage.kv, Date.now(), stageId);
     if (!grant) throw new Error("No reconnect is awaiting confirmation. Please try again.");
     this.#storeGrant(grant);
-    this.ctx.storage.kv.put("expiredNotified", false);
+    clearCredentialExpiryLatch(this.ctx.storage.kv);
   }
 
   #storeGrant(grant: StoredGrant): void {
@@ -553,12 +560,8 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async noteCredentialsExpired(): Promise<void> {
-    if (this.ctx.storage.kv.get<boolean>("expiredNotified")) return;
-    this.ctx.storage.kv.put("expiredNotified", true);
-    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    if (callback) {
-      await callback.credentialsExpired();
-    }
+    await notifyCredentialsExpiredOnce(this.ctx.storage.kv,
+      this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback"), VENDOR_ID);
   }
 
   async alarm(): Promise<void> {
@@ -939,10 +942,11 @@ class SupabaseSessionContext {
     try {
       await this.approvalQueue.submitAction(actionId, {
         title: "Run SQL on Supabase",
-        description:
-            `Execute a mutating SQL statement against Supabase project \`${ref}\`.\n\n` +
-            "```sql\n" + sql + "\n```" +
-            (params && params.length > 0 ? `\n\nParameters: \`${JSON.stringify(params)}\`` : ""),
+        // A field shows the statement literally, so nothing in it can escape into the prose.
+        ...buildDescription(`Execute a mutating SQL statement against Supabase project ${codeSpan(ref)}.`)
+          .verbatim("SQL", sql, "sql")
+          .json("Parameters", params ?? [])
+          .finish(),
         // Arbitrary SQL cannot be automatically reverted.
         implementsRevert: false,
         // This gatekeeper doesn't simulate writes, so the agent shouldn't continue (and read back

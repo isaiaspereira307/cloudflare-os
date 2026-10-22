@@ -17,6 +17,7 @@ import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   stripTrailingSlashes,
+  workerVersionTag,
   type AccountDescription,
   type ApprovalQueue,
   type ConnectHandoff,
@@ -53,6 +54,7 @@ import {
   NotionStore,
   applyStoredAction,
   defaultPropertiesFromSchema,
+  findWorkspaceParentPage,
   observation,
   overlayChildPages,
   overlayDatabaseRows,
@@ -300,6 +302,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "databases you share. Build agents that draft documents, organize notes, or manage " +
           "database records.",
     };
+  }
+
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
@@ -1411,6 +1417,10 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
   async createPage(options: NotionCreateDatabasePageOptions): Promise<NotionPageSession> {
     if (options.icon) assertValidIcon(options.icon);
     const schema = await this.#store.getDatabaseSchema(this.#databaseId);
+    // The description names the database's title column, and validation errors name its properties.
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [this.#databaseId],
+      observation("Read Notion database schema",
+        "Read the title column of the database the page is created in."));
     if (options.properties && Object.keys(options.properties).length > 0) {
       validateProperties(schema, options.properties);
     }
@@ -1539,11 +1549,16 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
 
   async createPage(options: NotionCreatePageOptions): Promise<NotionPageSession> {
     if (options.icon) assertValidIcon(options.icon);
+    // Chosen now, so the approver sees where the page will land.
+    const { id: parentPageId, title: parentTitle } = await findWorkspaceParentPage(this.#store);
+    // The description names the parent page's ID and title.
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [parentPageId],
+      observation("Read Notion parent page", "Read the page the new page is created under."));
     const provisionalId = this.#store.nextProvisionalId();
     const action: NotionAction = {
       type: "createPage",
       provisionalId,
-      parent: { kind: "workspace" },
+      parent: { kind: "workspace", pageId: parentPageId, title: parentTitle },
       title: options.title,
       content: options.content,
       icon: options.icon,

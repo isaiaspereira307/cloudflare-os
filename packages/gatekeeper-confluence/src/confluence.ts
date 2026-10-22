@@ -31,6 +31,7 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
+  workerVersionTag,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
@@ -256,6 +257,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "blog posts, and spaces you share. Build agents that draft documentation, organize " +
         "knowledge bases, or keep pages up to date.",
     };
+  }
+
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
   }
 
   async connectAccount(
@@ -1085,6 +1090,9 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
     }
     const create = this.#store.createActionFor(this.#contentId)?.action;
     const spaceKey = await this.#spaceKey(create);
+    // The description names the parent's space, read from the parent itself.
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
+      observation("Read Confluence parent page", "Read the space of the page a child page is created under."));
     const provisionalId = this.#store.nextProvisionalId();
     await this.#stage({
       type: "createContent", provisionalId, kind: "page",

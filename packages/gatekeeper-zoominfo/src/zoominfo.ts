@@ -3,6 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   stripTrailingSlashes,
+  workerVersionTag,
   type AccountDescription,
   type ConnectHandoff,
   type Gatekeeper,
@@ -16,8 +17,10 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { buildDescription, codeSpan } from "@gadgets/gatekeeper-kit/action-description";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { clearCredentialExpiryLatch, notifyCredentialsExpiredOnce } from "@gadgets/gatekeeper-kit/credential-expiry";
 import {
   ZoomInfoApi,
   ZoomInfoApiError,
@@ -197,6 +200,12 @@ const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
 // ---------------------------------------------------------------------------
 // Small helpers
 
+// A list of agent-chosen names (fields, topics) for an enrichment summary, which sits in the
+// description's prose and the title: one code span, so no name can open Markdown or HTML there.
+function fieldList(names: readonly (string | number)[]): string {
+  return names.length ? codeSpan(names.join(", ")) : "(none)";
+}
+
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -347,6 +356,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
+  }
+
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
     _options?: GatekeeperConnectOptions,
@@ -384,7 +397,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
-    this.ctx.storage.kv.put("expiredNotified", false);
+    clearCredentialExpiryLatch(this.ctx.storage.kv);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -496,7 +509,7 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put("accessTokenExpiresAt", grant.accessTokenExpiresAt);
     this.ctx.storage.kv.put("scopes", grant.scopes);
     this.ctx.storage.kv.put<StoredIdentity>("identity", grant.identity);
-    this.ctx.storage.kv.put("expiredNotified", false);
+    clearCredentialExpiryLatch(this.ctx.storage.kv);
   }
 
   async getAccessToken(): Promise<string> {
@@ -536,10 +549,8 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async noteCredentialsExpired(): Promise<void> {
-    if (this.ctx.storage.kv.get<boolean>("expiredNotified")) return;
-    this.ctx.storage.kv.put("expiredNotified", true);
-    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    if (callback) await callback.credentialsExpired();
+    await notifyCredentialsExpiredOnce(this.ctx.storage.kv,
+      this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback"), "zoominfo");
   }
 
   async alarm(): Promise<void> {
@@ -1084,6 +1095,8 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
   // so ZoomInfoGatekeeperImpl.applyAction() can replay it once approved, and returns a ticket the
   // Gadget passes to getEnrichmentResult(). No credits are spent until approval. `awaitDecision`
   // suspends the agent's turn until the user decides, so no result simulation is needed.
+  // `summary` opens the description's prose, so every agent value in it goes through `codeSpan`
+  // (`fieldList` for lists); the request itself is shown exactly in the fields.
   async #submitEnrichment(
     kind: EnrichmentKind,
     summary: string,
@@ -1096,10 +1109,15 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
     try {
       await this.#approvalQueue.submitAction(id, {
         title: `ZoomInfo: ${summary}`,
-        description:
-            `${summary}\n\n**Credit cost:** up to **${worstCaseCredits}** ZoomInfo bulk-data ` +
-            `credit${worstCaseCredits === 1 ? "" : "s"} (fewer if records are already under ` +
-            `management; none for no-match/error results). Charged only on approval.`,
+        // The request body is what leaves the workspace (names, emails, company identifiers), so
+        // the approver sees it exactly, after the summary and the cost.
+        ...buildDescription(
+          `${summary}\n\n**Credit cost:** up to **${worstCaseCredits}** ZoomInfo bulk-data ` +
+          `credit${worstCaseCredits === 1 ? "" : "s"} (fewer if records are already under ` +
+          `management; none for no-match/error results). Charged only on approval.`)
+          .json("Request", attributes)
+          .json("Page", page ?? {})
+          .finish(),
         // Spent credits can't be refunded, so there is no automatic revert.
         implementsRevert: false,
         // No simulation: suspend the agent until the user decides rather than letting it read back
@@ -1190,7 +1208,7 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
     return this.#submitEnrichment(
       "companies",
       `Enrich ${inputs.length} compan${inputs.length === 1 ? "y" : "ies"} with fields: ` +
-        `${outputFields.join(", ") || "(none)"}`,
+        `${fieldList(outputFields)}`,
       { matchCompanyInput, outputFields },
       inputs.length,
     );
@@ -1203,7 +1221,8 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
     const matchCompanyInput = inputs.map(input => clean({ ...input, companyId: idValue(input.companyId) }));
     return this.#submitEnrichment(
       "corporateHierarchy",
-      `Enrich corporate hierarchy for ${inputs.length} compan${inputs.length === 1 ? "y" : "ies"}`,
+      `Enrich corporate hierarchy for ${inputs.length} compan${inputs.length === 1 ? "y" : "ies"}, ` +
+        `requesting fields: ${fieldList(outputFields)}`,
       { matchCompanyInput, outputFields },
       inputs.length,
     );
@@ -1212,7 +1231,7 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
   async enrichHashtags(companyId: string): Promise<EnrichmentTicket> {
     return this.#submitEnrichment(
       "hashtags",
-      `Fetch hashtags for company \`${companyId}\``,
+      `Fetch hashtags for company ${codeSpan(String(companyId))}`,
       clean({ companyId: idValue(companyId) }),
       1,
     );
@@ -1248,8 +1267,8 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
     return this.#submitEnrichment(
       "contacts",
       `Enrich ${inputs.length} contact${inputs.length === 1 ? "" : "s"} with fields: ` +
-        `${outputFields.join(", ") || "(none)"}` +
-        `${requiredFields?.length ? `; required: ${requiredFields.join(", ")}` : ""}`,
+        `${fieldList(outputFields)}` +
+        `${requiredFields?.length ? `; required: ${fieldList(requiredFields)}` : ""}`,
       clean({ matchPersonInput, outputFields, requiredFields }),
       inputs.length,
     );
@@ -1280,8 +1299,8 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
   ): Promise<EnrichmentTicket> {
     return this.#submitEnrichment(
       "intent",
-      `Fetch intent signals for company \`${criteria.companyId}\` across topics ` +
-        `[${criteria.topics.join(", ")}]`,
+      "Fetch intent signals for the company named in the request across topics " +
+        `${fieldList(criteria.topics)}`,
       clean({ ...criteria, companyId: idValue(criteria.companyId) }),
       1,
       page,
@@ -1312,7 +1331,7 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
   ): Promise<EnrichmentTicket> {
     return this.#submitEnrichment(
       "scoops",
-      `Fetch scoops for company \`${criteria.companyId}\``,
+      "Fetch scoops for the company named in the request",
       clean({ ...criteria, companyId: idValue(criteria.companyId) }),
       1,
       page,
@@ -1339,7 +1358,7 @@ class ZoomInfoSessionImpl extends RpcTarget implements ZoomInfoSession {
   ): Promise<EnrichmentTicket> {
     return this.#submitEnrichment(
       "news",
-      `Fetch news articles for company \`${criteria.companyId}\``,
+      "Fetch news articles for the company named in the request",
       clean({ ...criteria, companyId: idValue(criteria.companyId) }),
       1,
       page,

@@ -34,6 +34,11 @@ pnpm --filter @gadgets/desktop build-runtime   # Workshop em src-tauri/resources
 pnpm --filter @gadgets/desktop dev             # ou: pnpm --filter @gadgets/desktop tauri build --bundles deb
 ```
 
+Para gerar um pacote autocontido, rode `pnpm --filter @gadgets/desktop package` no sistema alvo (não
+há cross-build): no Linux sai um AppImage em `src-tauri/target/release/bundle/appimage/`; no Windows,
+uma pasta portable e um `.zip` em `src-tauri/target/release/portable/`. Para embutir o WebView2 no
+portable, aponte `WEBVIEW2_FIXED_RUNTIME` para um "WebView2 Fixed Version Runtime" extraído.
+
 Rode `build-runtime` de novo sempre que mudar o código do Workshop. Ele empacota cada worker como o
 release faz (`wrangler deploy --dry-run`) e falha se a configuração gerada apontar para algum caminho
 desta máquina.
